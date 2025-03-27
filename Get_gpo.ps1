@@ -1,4 +1,3 @@
-# Directory to store output
 $exportPath = "C:\GPOReports_JSON"
 New-Item -Path $exportPath -ItemType Directory -Force | Out-Null
 
@@ -8,11 +7,16 @@ $fullJson = @()
 foreach ($gpo in $allGPOs) {
     Write-Host "Processing GPO: $($gpo.DisplayName)"
 
-    # Export XML report to memory
+    # Get WMI Filter if it exists
+    $wmiFilter = Get-GPOWmiFilter -Guid $gpo.Id -ErrorAction SilentlyContinue
+
+    # Get linked targets (OU, domain, site)
+    $gpoLinks = Get-GPOLinkedTargets -GPO $gpo.DisplayName
+
+    # Export GPO report to memory
     $reportXml = Get-GPOReport -Guid $gpo.Id -ReportType Xml
     [xml]$gpoXml = $reportXml
 
-    # Function to extract settings (Computer/User) from RegistrySettings, Scripts, Security, etc.
     function Extract-Settings {
         param (
             [xml]$gpoNode,
@@ -35,6 +39,8 @@ foreach ($gpo in $allGPOs) {
                             Type        = $reg.Type
                             Data        = $reg.Value
                             Hive        = $reg.Hive
+                            WmiFilter   = $wmiFilter?.Query
+                            LinkedTo    = $gpoLinks -join "; "
                         }
                     }
                 }
@@ -47,6 +53,8 @@ foreach ($gpo in $allGPOs) {
                             Category    = "Scripts"
                             Script      = $script.Script
                             Parameters  = $script.Parameters
+                            WmiFilter   = $wmiFilter?.Query
+                            LinkedTo    = $gpoLinks -join "; "
                         }
                     }
                 }
@@ -60,6 +68,8 @@ foreach ($gpo in $allGPOs) {
                             Category  = "Security"
                             Setting   = "Various (password, lockout, audit, etc.)"
                             Details   = $secSettings.InnerXml
+                            WmiFilter = $wmiFilter?.Query
+                            LinkedTo  = $gpoLinks -join "; "
                         }
                     }
                 }
@@ -70,6 +80,8 @@ foreach ($gpo in $allGPOs) {
                         AppliesTo = $scope
                         Category  = $extension.Name
                         Details   = $extension.InnerXml
+                        WmiFilter = $wmiFilter?.Query
+                        LinkedTo  = $gpoLinks -join "; "
                     }
                 }
             }
@@ -84,8 +96,28 @@ foreach ($gpo in $allGPOs) {
     $fullJson += $computerSettings + $userSettings
 }
 
-# Export the final JSON
-$jsonFile = "$exportPath\All_GPOs_Enhanced.json"
+# Export final JSON
+$jsonFile = "$exportPath\All_GPOs_Enhanced_WithWMI.json"
 $fullJson | ConvertTo-Json -Depth 5 | Out-File -Encoding UTF8 -FilePath $jsonFile
 
-Write-Host "`nExport completed. JSON file located at: $jsonFile"
+Write-Host "`nExport completed. File saved to: $jsonFile"
+
+# Helper function to find linked targets
+function Get-GPOLinkedTargets {
+    param ([string]$GPO)
+
+    $targets = @()
+    $ouLinks = Get-ADOrganizationalUnit -Filter * | ForEach-Object {
+        $inherit = Get-GPInheritance -Target $_.DistinguishedName
+        $link = $inherit.GpoLinks | Where-Object { $_.DisplayName -eq $GPO }
+        if ($link) { $_.DistinguishedName }
+    }
+    $domainLink = Get-GPInheritance -Target "DC=$(Get-ADDomain).DNSRoot" |
+        Select-Object -ExpandProperty GpoLinks |
+        Where-Object { $_.DisplayName -eq $GPO } |
+        ForEach-Object { "Domain: $($_.DisplayName)" }
+
+    $targets += $ouLinks
+    $targets += $domainLink
+    return $targets
+}
